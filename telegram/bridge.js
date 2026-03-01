@@ -942,34 +942,28 @@ getMediaType(msg) {
 
 
     async createUserMapping(participant, whatsappMsg) {
-        if (this.userMappings.has(participant)) {
-            const userData = this.userMappings.get(participant);
-            userData.messageCount = (userData.messageCount || 0) + 1;
-            await this.saveUserMapping(participant, userData);
-            return;
-        }
-
-        let userName = null;
-        let userPhone = participant.split('@')[0];
-        
-        try {
-            if (this.contactMappings.has(userPhone)) {
-                userName = this.contactMappings.get(userPhone);
-            }
-        } catch (error) {
-            logger.debug('Could not fetch contact info:', error);
-        }
-
-        const userData = {
-            name: userName,
-            phone: userPhone,
-            firstSeen: new Date(),
-            messageCount: 1
-        };
-
+    if (this.userMappings.has(participant)) {
+        const userData = this.userMappings.get(participant);
+        userData.messageCount = (userData.messageCount || 0) + 1;
         await this.saveUserMapping(participant, userData);
-        logger.debug(`👤 Created user mapping: ${userName || userPhone} (${userPhone})`);
+        return;
     }
+
+    const phone = participant.split('@')[0].split(':')[0];
+
+    // 🔒 STRICT: Only use saved contact mapping
+    const savedName = this.contactMappings.get(phone) || null;
+
+    const userData = {
+        name: savedName,   // NEVER pushName
+        phone: phone,
+        firstSeen: new Date(),
+        messageCount: 1
+    };
+
+    await this.saveUserMapping(participant, userData);
+    logger.debug(`👤 Created strict user mapping: ${savedName || phone}`);
+}
 
 async getOrCreateTopic(chatJid, whatsappMsg) {
     // 1. Resolve LID → PN if needed (for private chats)
@@ -1045,18 +1039,19 @@ async getOrCreateTopic(chatJid, whatsappMsg) {
             // 👤 CASE 4: PRIVATE CHATS (Strict: Saved Name OR Phone Only)
             // ============================================================
             else {
-                let phone = chatJid.split("@")[0].split(":")[0];
-                const phoneNoPlus = phone.replace("+", "");
-                const phoneWithPlus = `+${phoneNoPlus}`;
+    let phone = chatJid.split("@")[0].split(":")[0];
 
-                const savedName =
-                    this.contactMappings.get(phoneNoPlus) ||
-                    this.contactMappings.get(phoneWithPlus);
+    const phoneWithPlus = phone.startsWith('+') ? phone : `+${phone}`;
 
-                // STRICT: Saved Name OR Phone Number. (No PushName)
-                topicName = savedName || phoneWithPlus;
-                iconColor = 0x7ABA3C;
-            }
+    const savedName =
+        this.contactMappings.get(phone) ||
+        this.contactMappings.get(phoneWithPlus);
+
+    // 🔒 STRICT: saved contact name OR phone number only
+    topicName = savedName ? savedName : phoneWithPlus;
+
+    iconColor = 0x7ABA3C;
+}
 
             // ============================================================
             // 🚀 CREATE THE TOPIC
@@ -2046,43 +2041,55 @@ async sendSimpleMessage(topicId, text, sender) {
         logger.warn('Cannot subscribe to WhatsApp events - socket not available');
         return;
     }
-    
+
     const sock = this.whatsappBot.sock;
-    
-    // Listen for messaging history (contains contacts)
-    sock.ev.on('messaging-history.set', ({ chats, contacts, messages, isLatest }) => {
-        logger.info(`Received history sync: ${chats.length} chats, ${contacts.length} contacts, ${messages.length} messages`);
-        
-        if (contacts && contacts.length > 0) {
-            logger.info(`Processing ${contacts.length} contacts from history sync...`);
-            
-            let syncedCount = 0;
-            for (const contact of contacts) {
-                if (!contact.id || contact.id === 'status@broadcast') continue;
-                
-                const phone = contact.id.split('@')[0].split(':')[0];
-                let contactName = contact.name || contact.notify || contact.verifiedName;
-                
-                if (contactName && contactName !== phone && !contactName.startsWith('+')) {
-                    this.saveContactMapping(phone, contactName).catch(err => {
-                        logger.error(`Failed to save contact ${phone}:`, err);
-                    });
-                    syncedCount++;
-                }
+
+    // STRICT CONTACT HISTORY SYNC (NO PUSH NAME)
+    sock.ev.on('messaging-history.set', async ({ contacts }) => {
+        if (!contacts?.length) return;
+
+        logger.info(`📞 Processing ${contacts.length} contacts from history sync...`);
+
+        let syncedCount = 0;
+
+        for (const contact of contacts) {
+            if (!contact?.id || contact.id === 'status@broadcast') continue;
+
+            const phone = contact.id.split('@')[0].split(':')[0];
+
+            let contactName = null;
+
+            // 🔒 STRICT: Only saved contact name or verified business name
+            if (
+                contact.name &&
+                contact.name !== phone &&
+                !contact.name.startsWith('+') &&
+                contact.name.trim().length > 0
+            ) {
+                contactName = contact.name.trim();
             }
-            
-            logger.info(`Synced ${syncedCount} contacts from history`);
-            
-            // Update topic names after contacts are synced
-            setTimeout(() => {
-                this.updateTopicNames().catch(err => {
-                    logger.error('Failed to update topic names:', err);
-                });
-            }, 1000);
+            else if (
+                contact.verifiedName &&
+                contact.verifiedName !== phone &&
+                contact.verifiedName.trim().length > 0
+            ) {
+                contactName = contact.verifiedName.trim();
+            }
+
+            if (contactName) {
+                await this.saveContactMapping(phone, contactName);
+                syncedCount++;
+            }
+        }
+
+        logger.info(`✅ Synced ${syncedCount} strict contacts from history`);
+
+        if (syncedCount > 0) {
+            await this.updateTopicNames();
         }
     });
-    
-    logger.info('Subscribed to WhatsApp messaging-history.set event');
+
+    logger.info('📱 Strict contact sync enabled');
 }
     async streamToBuffer(stream) {
         const chunks = [];
