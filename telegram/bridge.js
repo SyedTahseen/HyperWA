@@ -1058,11 +1058,8 @@ async getOrCreateTopic(chatJid, whatsappMsg) {
             else {
                 const phone = chatJid.split("@")[0].split(":")[0];
                 const phoneWithPlus = phone.startsWith("+") ? phone : `+${phone}`;
-                const savedName =
-                    this.contactMappings.get(phone) ||
-                    this.contactMappings.get(phoneWithPlus);
-
-                topicName = savedName ? savedName : phoneWithPlus;
+                const contactName = this.contactMappings.get(phone);
+                topicName = contactName || `+${phone}`;
             }
 
             const topic = await this.telegramBot.createForumTopic(chatId, topicName, {
